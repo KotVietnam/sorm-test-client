@@ -13,32 +13,46 @@ def run_standalone():
     # Настройка браузера
     opts = Options()
     opts.add_argument("--start-maximized")
-    # opts.add_argument("--headless") # Раскомментить, если нужно без окна
+    # opts.add_argument("--headless") # Раскомментируй, если не хочешь видеть окно
+    opts.add_argument("--ignore-certificate-errors") # Игнорировать ошибки SSL (важно для DLP MITM)
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
     
     try:
-        # 1. Поисковые запросы (HTTP/HTTPS)
-        log("1. Генерация поисковых запросов (Google/Bing)...")
+        # 1. Посещение HTTP сайтов (Чистый текст, порт 80)
+        # DLP должна увидеть полный URL в открытом виде
+        http_sites = [
+            "http://kremlin.ru",       # Сайт Президента РФ
+            "http://neverssl.com",     # Специальный сайт для тестов HTTP
+            "http://example.com"       # Стандартная заглушка
+        ]
+        
+        log("1. Проверка HTTP сайтов (Unencrypted)...")
+        for url in http_sites:
+            log(f"   -> Открываем: {url}")
+            driver.get(url)
+            time.sleep(5) # Ждем прогрузки, чтобы DLP успела перехватить контент
+
+        # 2. Поисковые запросы (HTTPS)
+        log("2. Генерация поисковых запросов (Google)...")
         driver.get(f"https://www.google.com/search?q={config.SECRET_DATA}")
         time.sleep(3)
         
-        # 2. Мессенджеры (Web Versions)
+        # 3. Мессенджеры (Web Versions)
         # Просто заходим, чтобы DLP увидел SSL handshake с доменами мессенджеров
-        targets = [
+        messengers = [
             ("WhatsApp Web", "https://web.whatsapp.com"),
             ("Telegram Web", "https://web.telegram.org"),
-            ("Skype Online", "https://web.skype.com"),
-            ("LinkedIn", "https://www.linkedin.com")
+            ("Skype Online", "https://web.skype.com")
         ]
         
-        for name, url in targets:
-            log(f"2. Проверка детекции приложения: {name}...")
+        for name, url in messengers:
+            log(f"3. Проверка детекции приложения: {name}...")
             driver.get(url)
-            time.sleep(5) # Даем время на загрузку скриптов
+            time.sleep(5) 
             
-        # 3. HTTP POST (Утечка данных в публичный bin)
-        log("3. Попытка отправки данных через HTTP POST...")
+        # 4. HTTP POST (Утечка данных в публичный bin)
+        log("4. Попытка отправки данных через HTTP POST...")
         # httpbin.org - публичный сервис для тестов
         driver.execute_script(f"""
             fetch('https://httpbin.org/post', {{
