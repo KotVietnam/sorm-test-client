@@ -18,11 +18,11 @@ from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
 try:
-    from scapy.all import sniff, wrpcap, rdpcap, sendp, IP, Ether
+    from scapy.all import sniff, wrpcap, rdpcap, sendp, IP
     HAS_SCAPY = True
 except ImportError:
     HAS_SCAPY = False
-    print("[WARN] Scapy не установлен. PCAP логи работать не будут.")
+    print("[WARN] Scapy не установлен.")
 
 # --- CONFIG ---
 HOST = config.LAB_SERVER_IP
@@ -35,7 +35,7 @@ if not os.path.exists(RESULTS_DIR):
 def log(msg): print(f"[AUDIT] {msg}")
 
 # ===========================
-# 1. СНИФФЕР (С ФИЛЬТРОМ)
+# 1. СНИФФЕР (ИСПРАВЛЕННЫЙ)
 # ===========================
 stop_sniffer = threading.Event()
 
@@ -43,109 +43,153 @@ def traffic_sniffer():
     if not HAS_SCAPY: return
     pcap_file = os.path.join(RESULTS_DIR, "session_dump.pcap")
     
-    # ФИЛЬТР: Записываем ТОЛЬКО трафик, связанный с нашим сервером.
-    # Это уберет лишний шум.
+    # Фильтр: только наш сервер
     bpf_filter = f"host {HOST}"
+    log(f"🔴 [SNIFFER] Старт. Фильтр: {bpf_filter}")
     
-    log(f"🔴 [SNIFFER] Запись трафика в {pcap_file}")
-    log(f"   [FILTER] Ловим только: {bpf_filter}")
+    packets = []
     
-    try:
-        # sniff будет ловить только пакеты, где src или dst == HOST
-        packets = sniff(filter=bpf_filter, stop_filter=lambda x: stop_sniffer.is_set(), timeout=None)
+    # ЦИКЛ: Читаем по 1 секунде, проверяем флаг стоп
+    # Это решает проблему бесконечного зависания
+    while not stop_sniffer.is_set():
+        try:
+            # timeout=1 позволяет скрипту "просыпаться" и проверять stop_sniffer
+            pkts = sniff(filter=bpf_filter, timeout=1)
+            packets.extend(pkts)
+        except Exception:
+            pass # Игнорируем ошибки интерфейса
+            
+    # Сохраняем
+    if packets:
         wrpcap(pcap_file, packets)
-        log(f"✅ [SNIFFER] Лог сохранен ({len(packets)} пакетов).")
-    except Exception as e:
-        log(f"❌ [SNIFFER] Ошибка: {e}. Возможно, не установлен Npcap?")
+        log(f"✅ [SNIFFER] Сохранено {len(packets)} пакетов.")
+    else:
+        log("⚠️ [SNIFFER] Пакеты не перехвачены (возможно, не тот интерфейс или IP).")
 
 # ===========================
-# 2. БРАУЗЕР (ПОЛНАЯ ВЕРСИЯ)
+# 2. XMPP (RAW SOCKET)
 # ===========================
-def test_browser():
-    log("=== BROWSER TEST (Full List) ===")
-    opts = Options()
-    opts.add_argument("--ignore-certificate-errors")
-    opts.add_argument("--start-maximized") # Чтобы видеть процесс
-    # opts.add_argument("--headless")    # Раскомментируй, чтобы скрыть окно
-
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-    driver.set_page_load_timeout(10)
-
-    # 1. HTTP Сайты
-    http_sites = [
-        "http://kremlin.ru", 
-        "http://neverssl.com",
-        "http://example.com"
-    ]
-    log("   [WEB] 1. Проверка HTTP сайтов...")
-    for url in http_sites:
-        try:
-            driver.get(url)
-            log(f"      -> {url} : OK")
-            time.sleep(2)
-        except TimeoutException:
-            log(f"      -> {url} : SKIP (Timeout)")
-            driver.execute_script("window.stop();")
-        except Exception as e:
-            log(f"      -> {url} : ERR ({e})")
-
-    # 2. Мессенджеры
-    messengers = [
-        ("WhatsApp Web", "https://web.whatsapp.com"),
-        ("Telegram Web", "https://web.telegram.org"),
-        ("Skype Web", "https://web.skype.com")
-    ]
-    log("   [WEB] 2. Проверка мессенджеров...")
-    for name, url in messengers:
-        try:
-            driver.get(url)
-            log(f"      -> {name} : Открыт")
-            time.sleep(3)
-        except TimeoutException:
-            log(f"      -> {name} : SKIP (Timeout)")
-            driver.execute_script("window.stop();")
-
-    # 3. Google Поиск
-    log(f"   [WEB] 3. Поиск Google: '{SECRET}'")
+def test_xmpp_raw():
+    log("=== XMPP (Jabber) TEST ===")
     try:
-        driver.get(f"https://www.google.com/search?q={SECRET}")
-        time.sleep(2)
-    except: pass
+        # 1. Подключаемся
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((HOST, 5222))
+        
+        # 2. Формируем XMPP приветствие (Handshake)
+        # Это стандартный заголовок любого Jabber клиента
+        stream_header = f"<stream:stream to='{HOST}' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>".encode()
+        s.send(stream_header)
+        
+        # Читаем ответ сервера (он должен прислать свой stream ID)
+        try:
+            resp = s.recv(4096)
+            # log(f"   [DEBUG] Server hello: {resp}") # Раскомментируй для отладки
+        except socket.timeout:
+            pass
 
-    driver.quit()
-    log("   [WEB] ✅ Браузер отработал.")
+        # 3. ОТПРАВЛЯЕМ СЕКРЕТ
+        # Мы шлем сообщение без авторизации. 
+        # Сервер его скорее всего отвергнет ошибкой, НО сам пакет с текстом
+        # "LEAK: ..." физически уйдет в провод. Этого достаточно для DLP.
+        
+        msg_body = f"""
+<message to='admin@{HOST}' type='chat'>
+  <body>XMPP LEAK CHECK: {SECRET}</body>
+</message>
+"""
+        s.send(msg_body.encode())
+        log(f"   [XMPP] 📤 Пакет с сообщением отправлен (Raw Socket).")
+        
+        # Корректно закрываем поток
+        s.send(b"</stream:stream>")
+        time.sleep(0.5)
+        s.close()
+        
+        log(f"   [XMPP] ✅ Тест завершен.")
+        
+    except Exception as e:
+        log(f"   [XMPP] ❌ Fail: {e}")
 
 # ===========================
-# 3. СЕТЕВЫЕ ТЕСТЫ
+# 3. EMAIL (ИСПРАВЛЕННЫЙ)
 # ===========================
+def test_email_cycle():
+    log(f"=== EMAIL TEST ===")
+    try:
+        # A. SMTP (Отправка)
+        # Мы отключили auth в GreenMail, поэтому login не обязателен, 
+        # но для DLP лучше, чтобы он был.
+        s = smtplib.SMTP(HOST, 25)
+        try:
+            s.login("user", "pass") # Пробуем, если сервер пустит
+        except:
+            pass # Если ошибка - шлем без логина (GreenMail примет)
+            
+        msg = f"Subject: LEAK\nFrom: attacker@test\nTo: user@test\n\n{SECRET}"
+        s.sendmail("attacker@test", "user@test", msg.encode('utf-8'))
+        s.quit()
+        log("   [SMTP] ⬆️ Письмо отправлено.")
+        
+        time.sleep(1)
+        
+        # B. POP3 (Получение)
+        p = poplib.POP3(HOST, 110)
+        p.user("user")
+        p.pass_("pass")
+        count = len(p.list()[1])
+        if count > 0:
+            # Скачиваем последнее
+            lines = p.retr(count)[1]
+            full_msg = b"\n".join(lines).decode('utf-8', errors='ignore')
+            
+            with open(os.path.join(RESULTS_DIR, "email.eml"), "w") as f:
+                f.write(full_msg)
+            
+            if SECRET in full_msg:
+                log("   [POP3] ✅ Письмо получено и секрет внутри.")
+            else:
+                log("   [POP3] ⚠️ Письмо есть, но секрета нет.")
+        else:
+            log("   [POP3] ❌ Ящик пуст.")
+        p.quit()
+        
+    except Exception as e:
+        log(f"   [EMAIL] Fail: {e}")
 
+# ===========================
+# 4. SIP & ДРУГИЕ
+# ===========================
 def test_sip_voip():
-    log(f"=== SIP/VoIP TEST (Call -> Record -> Download) ===")
+    log(f"=== SIP/VoIP TEST ===")
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        invite = f"INVITE sip:100@{HOST} SIP/2.0\r\nCall-ID: {int(time.time())}\r\nFrom: auditor\r\n".encode()
+        # Уникальный Call-ID
+        cid = int(time.time())
+        invite = f"INVITE sip:100@{HOST} SIP/2.0\r\nCall-ID: {cid}\r\nFrom: auditor\r\n".encode()
         sock.sendto(invite, (HOST, 5060))
         
-        log("   [SIP] 📞 Звонок и генерация RTP (10 сек)...")
-        # RTP Шум
-        for i in range(500):
+        log("   [SIP] 📞 Звонок (RTP поток)...")
+        # RTP
+        for i in range(550): # Чуть меньше 11 сек
             sock.sendto(os.urandom(160), (HOST, 10000))
             time.sleep(0.02)
         sock.close()
-        log("   [SIP] 🏁 Звонок завершен. Ждем сохранения wav...")
-        time.sleep(5) # Ждем пока Asterisk отработает скрипт chmod
+        
+        log("   [SIP] 🏁 Ждем сохранения файла (5 сек)...")
+        time.sleep(5) 
         
         # Скачивание
         url = f"http://{HOST}/recordings/dlp_record.wav"
         save_path = os.path.join(RESULTS_DIR, "call_evidence.wav")
         
-        log(f"   [SIP] Попытка скачать: {url}")
         r = requests.get(url)
         if r.status_code == 200:
             with open(save_path, 'wb') as f: f.write(r.content)
             log(f"   [SIP] ✅ УСПЕХ: Файл скачан ({len(r.content)} байт).")
         else:
-            log(f"   [SIP] ❌ Ошибка скачивания: Код {r.status_code} (Проверь chmod в extensions.conf)")
+            log(f"   [SIP] ❌ Ошибка скачивания: {r.status_code} (Проверь права на сервере)")
             
     except Exception as e:
         log(f"   [SIP] Fail: {e}")
@@ -156,54 +200,62 @@ def test_ftp_cycle():
         ftp = ftplib.FTP()
         ftp.connect(HOST, 21)
         ftp.login("dlpuser", "dlpsecret")
-        local_file = "secret_ftp.txt"
+        local_file = "ftp_leak.txt"
         with open(local_file, "w") as f: f.write(f"CONFIDENTIAL: {SECRET}")
         with open(local_file, "rb") as f: ftp.storbinary(f"STOR {local_file}", f)
         
-        verified = os.path.join(RESULTS_DIR, "ftp_evidence.txt")
-        with open(verified, "wb") as f: ftp.retrbinary(f"RETR {local_file}", f.write)
+        with open(os.path.join(RESULTS_DIR, "ftp_evidence.txt"), "wb") as f: 
+            ftp.retrbinary(f"RETR {local_file}", f.write)
         ftp.quit()
         os.remove(local_file)
-        log("   [FTP] ✅ Загрузка и скачивание успешны.")
+        log("   [FTP] ✅ OK")
     except Exception as e: log(f"   [FTP] Fail: {e}")
-
-def test_email_cycle():
-    log(f"=== EMAIL TEST ===")
-    try:
-        s = smtplib.SMTP(HOST, 25)
-        s.login("u", "p")
-        s.sendmail("a@l", "u@l", f"Subject: LEAK\n\n{SECRET}".encode())
-        s.quit()
-        time.sleep(1)
-        p = poplib.POP3(HOST, 110)
-        p.user("user"); p.pass_("pass")
-        if len(p.list()[1]) > 0:
-            with open(os.path.join(RESULTS_DIR, "email.eml"), "wb") as f:
-                f.write(b"\n".join(p.retr(len(p.list()[1]))[1]))
-            log("   [POP3] ✅ Письмо получено.")
-        p.quit()
-    except Exception as e: log(f"   [EMAIL] Fail: {e}")
 
 def test_h323_replay():
     if not HAS_SCAPY: return
-    log("=== H.323 REPLAY TEST ===")
+    log("=== H.323 REPLAY ===")
     pcap_path = "pcaps/h323.pcap"
     if not os.path.exists(pcap_path):
-        log("   [SKIP] Файл pcaps/h323.pcap не найден. Скачайте пример H.323 трафика в эту папку.")
+        log("   [SKIP] Файл pcaps/h323.pcap не найден.")
         return
     try:
         packets = rdpcap(pcap_path)
-        log(f"   [H.323] Отправка {len(packets)} пакетов на {HOST}...")
+        log(f"   [H.323] Отправка {len(packets)} пакетов...")
         for pkt in packets:
             if IP in pkt: 
                 pkt[IP].dst = HOST
-                # Убираем checksum, Scapy пересчитает
-                del pkt[IP].chksum
+                del pkt[IP].chksum # Scapy пересчитает
             sendp(pkt, verbose=0)
             time.sleep(0.002)
-        log("   [H.323] ✅ Трафик отправлен.")
+        log("   [H.323] ✅ OK")
     except Exception as e:
         log(f"   [H.323] Fail: {e}")
+
+def test_browser():
+    log("=== BROWSER TEST ===")
+    opts = Options()
+    opts.add_argument("--ignore-certificate-errors")
+    # opts.add_argument("--headless") # Раскомментируй, если не хочешь видеть окно
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    driver.set_page_load_timeout(15)
+
+    urls = [
+        ("Google Search", f"https://www.google.com/search?q={SECRET}"),
+        ("WhatsApp", "https://web.whatsapp.com"),
+        ("Telegram", "https://web.telegram.org"),
+        ("Skype", "https://web.skype.com"),
+        ("Http Site", "http://example.com")
+    ]
+    
+    for name, link in urls:
+        try:
+            log(f"   [WEB] {name}...")
+            driver.get(link)
+            time.sleep(3)
+        except: log(f"   [WEB] Skip {name}")
+        
+    driver.quit()
+    log("   [WEB] ✅ Done.")
 
 def test_others():
     log("=== OTHERS ===")
@@ -211,14 +263,15 @@ def test_others():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.sendto(b'\x01'*20, (HOST, 1812))
-        log("   [RADIUS] ✅ OK")
+        log("   [RADIUS] ✅ Packet sent.")
     except: pass
+    
     # Telnet
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2); s.connect((HOST, 23))
         s.recv(1024); s.send(b"exit\n"); s.close()
-        log("   [TELNET] ✅ OK")
+        log("   [TELNET] ✅ Connection OK.")
     except Exception as e: log(f"   [TELNET] Fail: {e}")
 
 # ===========================
@@ -230,28 +283,25 @@ if __name__ == "__main__":
         print("❌ ОШИБКА: Замени IP в config.py!")
         exit()
 
-    # 1. Запуск сниффера
+    # Запуск сниффера
     if HAS_SCAPY:
         sniff_thread = threading.Thread(target=traffic_sniffer)
         sniff_thread.start()
         time.sleep(2)
         
-    # 2. Тесты
+    # Тесты
     test_ftp_cycle()
     test_email_cycle()
+    test_xmpp_raw()   # <-- Добавили XMPP
     test_sip_voip()
     test_h323_replay()
     test_others()
     test_browser()
     
-    # 3. Стоп сниффер
+    # Стоп сниффера
     log("🏁 Завершение...")
     if HAS_SCAPY:
         stop_sniffer.set()
-        try: # Пингуем сами себя, чтобы разбудить сниффер
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.sendto(b'', ("127.0.0.1", 65432))
-        except: pass
         sniff_thread.join()
         
     print(f"\n📂 Результаты: {os.path.abspath(RESULTS_DIR)}")
