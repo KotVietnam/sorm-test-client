@@ -64,6 +64,51 @@ else:
     PYRAD_IMPORT_ERROR = None
 
 
+def load_env(path):
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip("'").strip('"')
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        return
+
+
+def env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_int(name, default):
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def env_float(name, default):
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
 class TrafficBlaster:
     COLOR_OK = "\033[32m"
     COLOR_FAIL = "\033[31m"
@@ -97,6 +142,26 @@ class TrafficBlaster:
         rss_path=None,
         open_sites=False,
         sites=None,
+        sip_port=5060,
+        iax2_port=4569,
+        mgcp_port=2427,
+        skinny_port=2000,
+        smtp_port=25,
+        pop3_port=110,
+        imap_port=143,
+        http_port=80,
+        https_port=443,
+        ftp_port=21,
+        irc_port=6667,
+        xmpp_port=5222,
+        radius_port=1812,
+        telnet_port=23,
+        smtp_starttls=False,
+        smtp_auth=True,
+        pop3_ssl=False,
+        imap_ssl=False,
+        ftp_passive=True,
+        radius_raw=False,
     ):
         self.server_ip = server_ip
         self.timeout = float(timeout)
@@ -114,6 +179,26 @@ class TrafficBlaster:
         self.rss_path = rss_path or os.path.join(os.getcwd(), "data", "client", "rss.xml")
         self.open_sites = open_sites
         self.sites = sites or list(self.DEFAULT_PUBLIC_SITES)
+        self.sip_port = int(sip_port)
+        self.iax2_port = int(iax2_port)
+        self.mgcp_port = int(mgcp_port)
+        self.skinny_port = int(skinny_port)
+        self.smtp_port = int(smtp_port)
+        self.pop3_port = int(pop3_port)
+        self.imap_port = int(imap_port)
+        self.http_port = int(http_port)
+        self.https_port = int(https_port)
+        self.ftp_port = int(ftp_port)
+        self.irc_port = int(irc_port)
+        self.xmpp_port = int(xmpp_port)
+        self.radius_port = int(radius_port)
+        self.telnet_port = int(telnet_port)
+        self.smtp_starttls = bool(smtp_starttls)
+        self.smtp_auth = bool(smtp_auth)
+        self.pop3_ssl = bool(pop3_ssl)
+        self.imap_ssl = bool(imap_ssl)
+        self.ftp_passive = bool(ftp_passive)
+        self.radius_raw = bool(radius_raw)
         self.use_color = self._init_color()
         self.stats = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
         self.local_ip = self._detect_local_ip()
@@ -191,7 +276,8 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"{label}: send failed ({exc})")
 
-    def sip_options(self, port=5060):
+    def sip_options(self, port=None):
+        port = port or self.sip_port
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(self.timeout)
         target = self.server_ip
@@ -255,7 +341,8 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"H.323 tool failed ({exc})")
 
-    def iax2_ping(self, port=4569):
+    def iax2_ping(self, port=None):
+        port = port or self.iax2_port
         if send is None:
             self._log_fail(f"IAX2 ping: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
@@ -283,7 +370,8 @@ class TrafficBlaster:
         )
         self._scapy_send(packet, "IAX2 ping")
 
-    def mgcp_auep(self, port=2427):
+    def mgcp_auep(self, port=None):
+        port = port or self.mgcp_port
         if send is None:
             self._log_fail(f"MGCP AUEP: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
@@ -295,7 +383,8 @@ class TrafficBlaster:
         )
         self._scapy_send(packet, "MGCP AUEP")
 
-    def skinny_keepalive(self, port=2000):
+    def skinny_keepalive(self, port=None):
+        port = port or self.skinny_port
         if send is None:
             self._log_fail(f"Skinny keepalive: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
@@ -307,10 +396,19 @@ class TrafficBlaster:
         )
         self._scapy_send(packet, "Skinny keepalive")
 
-    def smtp_send(self, port=25):
+    def smtp_send(self, port=None):
+        port = port or self.smtp_port
         try:
             with smtplib.SMTP(self.server_ip, port, timeout=self.timeout) as smtp:
                 smtp.ehlo()
+                if self.smtp_starttls:
+                    smtp.starttls()
+                    smtp.ehlo()
+                if self.smtp_auth and self.mail_user and self.mail_pass:
+                    try:
+                        smtp.login(self.mail_user, self.mail_pass)
+                    except smtplib.SMTPException as exc:
+                        self._log_warn(f"SMTP auth skipped ({exc})")
                 msg = (
                     f"From: {self.mail_from}\r\n"
                     f"To: {self.mail_to}\r\n"
@@ -322,9 +420,11 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"SMTP failed ({exc})")
 
-    def pop3_check(self, port=110):
+    def pop3_check(self, port=None):
+        port = port or self.pop3_port
         try:
-            pop = poplib.POP3(self.server_ip, port, timeout=self.timeout)
+            pop_class = poplib.POP3_SSL if self.pop3_ssl else poplib.POP3
+            pop = pop_class(self.server_ip, port, timeout=self.timeout)
             pop.user(self.mail_user)
             pop.pass_(self.mail_pass)
             pop.noop()
@@ -333,9 +433,11 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"POP3 failed ({exc})")
 
-    def imap_check(self, port=143):
+    def imap_check(self, port=None):
+        port = port or self.imap_port
         try:
-            imap = imaplib.IMAP4(self.server_ip, port)
+            imap_class = imaplib.IMAP4_SSL if self.imap_ssl else imaplib.IMAP4
+            imap = imap_class(self.server_ip, port)
             imap.login(self.mail_user, self.mail_pass)
             imap.select("INBOX")
             imap.logout()
@@ -343,33 +445,45 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"IMAP failed ({exc})")
 
-    def http_get(self):
+    def http_get(self, port=None):
         if requests is None:
             self._log_fail(f"HTTP GET: requests unavailable ({REQUESTS_IMPORT_ERROR})")
             return
-        url = f"http://{self.server_ip}/"
+        port = port or self.http_port
+        if int(port) == 80:
+            url = f"http://{self.server_ip}/"
+        else:
+            url = f"http://{self.server_ip}:{port}/"
         try:
             resp = requests.get(url, timeout=self.timeout)
             self._log_ok(f"HTTP GET {url} -> {resp.status_code}")
         except Exception as exc:
             self._log_fail(f"HTTP GET failed ({exc})")
 
-    def https_get(self):
+    def https_get(self, port=None):
         if requests is None:
             self._log_fail(f"HTTPS GET: requests unavailable ({REQUESTS_IMPORT_ERROR})")
             return
-        url = f"https://{self.server_ip}/"
+        port = port or self.https_port
+        if int(port) == 443:
+            url = f"https://{self.server_ip}/"
+        else:
+            url = f"https://{self.server_ip}:{port}/"
         try:
             resp = requests.get(url, timeout=self.timeout, verify=False)
             self._log_ok(f"HTTPS GET {url} -> {resp.status_code}")
         except Exception as exc:
             self._log_fail(f"HTTPS GET failed ({exc})")
 
-    def rss_download(self):
+    def rss_download(self, port=None):
         if requests is None:
             self._log_fail(f"RSS download: requests unavailable ({REQUESTS_IMPORT_ERROR})")
             return
-        url = f"http://{self.server_ip}/rss.xml"
+        port = port or self.http_port
+        if int(port) == 80:
+            url = f"http://{self.server_ip}/rss.xml"
+        else:
+            url = f"http://{self.server_ip}:{port}/rss.xml"
         try:
             resp = requests.get(url, timeout=self.timeout)
             os.makedirs(os.path.dirname(self.rss_path), exist_ok=True)
@@ -379,13 +493,14 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"RSS download failed ({exc})")
 
-    def ftp_transfer(self, port=21):
+    def ftp_transfer(self, port=None):
+        port = port or self.ftp_port
         data = f"dlp test {time.time()}\n".encode("ascii")
         ftp = ftplib.FTP()
         try:
             ftp.connect(self.server_ip, port, timeout=self.timeout)
             ftp.login(self.ftp_user, self.ftp_pass)
-            ftp.set_pasv(True)
+            ftp.set_pasv(self.ftp_passive)
             ftp.storbinary("STOR dlp_test.txt", io.BytesIO(data))
             self._log_ok("FTP upload completed")
             downloaded = io.BytesIO()
@@ -400,7 +515,8 @@ class TrafficBlaster:
             except Exception:
                 pass
 
-    def irc_hello(self, port=6667):
+    def irc_hello(self, port=None):
+        port = port or self.irc_port
         try:
             with socket.create_connection((self.server_ip, port), timeout=self.timeout) as sock:
                 nick = f"dlp{random.randint(1000, 9999)}"
@@ -410,7 +526,8 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"IRC failed ({exc})")
 
-    def xmpp_stream(self, port=5222):
+    def xmpp_stream(self, port=None):
+        port = port or self.xmpp_port
         try:
             with socket.create_connection((self.server_ip, port), timeout=self.timeout) as sock:
                 stream = (
@@ -425,7 +542,8 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"XMPP failed ({exc})")
 
-    def radius_access_request(self, port=1812):
+    def radius_access_request(self, port=None):
+        port = port or self.radius_port
         if Client is None:
             self._log_fail(f"RADIUS: pyrad unavailable ({PYRAD_IMPORT_ERROR})")
             return
@@ -444,12 +562,20 @@ class TrafficBlaster:
             req["User-Name"] = self.radius_user
             req["User-Password"] = req.PwCrypt(self.radius_pass)
             req["NAS-IP-Address"] = self.local_ip
-            if hasattr(select, "poll"):
+            use_raw = self.radius_raw or os.name == "nt" or not hasattr(select, "poll")
+            if use_raw:
+                self._log_warn("RADIUS raw mode; sending without response wait")
+                self._radius_send_fallback(req, port)
+                return
+            try:
                 client.SendPacket(req)
                 self._log_ok("RADIUS Access-Request sent")
-            else:
-                self._log_warn("select.poll unavailable; sending RADIUS without response wait")
-                self._radius_send_fallback(req, port)
+            except Exception as exc:
+                if "poll" in str(exc):
+                    self._log_warn("RADIUS fallback due to poll error")
+                    self._radius_send_fallback(req, port)
+                else:
+                    raise
         except Exception as exc:
             self._log_fail(f"RADIUS failed ({exc})")
         finally:
@@ -476,7 +602,8 @@ class TrafficBlaster:
         finally:
             sock.close()
 
-    def telnet_session(self, port=23):
+    def telnet_session(self, port=None):
+        port = port or self.telnet_port
         if telnetlib is None:
             self._log_warn(
                 f"telnetlib unavailable ({TELNETLIB_IMPORT_ERROR}); using raw socket"
@@ -559,29 +686,64 @@ class TrafficBlaster:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DLP-Test-Lab traffic generator")
-    parser.add_argument("server_ip", help="DLP-Test-Lab server IP address")
-    parser.add_argument("--timeout", type=float, default=5.0, help="Socket timeout in seconds")
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--env-file", default=os.getenv("DLP_ENV_FILE", ".env"))
+    pre_args, _ = pre.parse_known_args()
+    load_env(pre_args.env_file)
+
+    parser = argparse.ArgumentParser(description="DLP-Test-Lab traffic generator", parents=[pre])
+    parser.add_argument(
+        "server_ip",
+        nargs="?",
+        default=os.getenv("DLP_SERVER_IP"),
+        help="DLP-Test-Lab server IP address (or set DLP_SERVER_IP)",
+    )
+    parser.add_argument("--timeout", type=float, default=env_float("DLP_TIMEOUT", 5.0), help="Socket timeout in seconds")
     parser.add_argument("--domain", default=os.getenv("DLP_DOMAIN", "dlp.local"))
     parser.add_argument("--mail-user", default=os.getenv("DLP_MAIL_USER", "dlp"))
     parser.add_argument("--mail-pass", default=os.getenv("DLP_MAIL_PASS", "dlp"))
     parser.add_argument("--mail-from", default=os.getenv("DLP_MAIL_FROM"))
     parser.add_argument("--mail-to", default=os.getenv("DLP_MAIL_TO"))
+    parser.add_argument("--smtp-port", type=int, default=env_int("DLP_SMTP_PORT", 25))
+    parser.add_argument("--pop3-port", type=int, default=env_int("DLP_POP3_PORT", 110))
+    parser.add_argument("--imap-port", type=int, default=env_int("DLP_IMAP_PORT", 143))
+    parser.add_argument("--smtp-starttls", action="store_true", default=env_flag("DLP_SMTP_STARTTLS"))
+    parser.add_argument("--smtp-no-auth", action="store_true", default=env_flag("DLP_SMTP_NO_AUTH"))
+    parser.add_argument("--pop3-ssl", action="store_true", default=env_flag("DLP_POP3_SSL"))
+    parser.add_argument("--imap-ssl", action="store_true", default=env_flag("DLP_IMAP_SSL"))
+    parser.add_argument("--http-port", type=int, default=env_int("DLP_HTTP_PORT", 80))
+    parser.add_argument("--https-port", type=int, default=env_int("DLP_HTTPS_PORT", 443))
     parser.add_argument("--ftp-user", default=os.getenv("DLP_FTP_USER", "dlp"))
     parser.add_argument("--ftp-pass", default=os.getenv("DLP_FTP_PASS", "dlp"))
+    parser.add_argument("--ftp-port", type=int, default=env_int("DLP_FTP_PORT", 21))
+    parser.add_argument("--ftp-active", action="store_true", default=env_flag("DLP_FTP_ACTIVE"))
     parser.add_argument("--radius-secret", default=os.getenv("DLP_RADIUS_SECRET", "testing123"))
     parser.add_argument("--radius-user", default=os.getenv("DLP_RADIUS_USER", "dlpuser"))
     parser.add_argument("--radius-pass", default=os.getenv("DLP_RADIUS_PASS", "dlppass"))
+    parser.add_argument("--radius-port", type=int, default=env_int("DLP_RADIUS_PORT", 1812))
+    parser.add_argument("--radius-raw", action="store_true", default=env_flag("DLP_RADIUS_RAW"))
+    parser.add_argument("--sip-port", type=int, default=env_int("DLP_SIP_PORT", 5060))
+    parser.add_argument("--iax2-port", type=int, default=env_int("DLP_IAX2_PORT", 4569))
+    parser.add_argument("--mgcp-port", type=int, default=env_int("DLP_MGCP_PORT", 2427))
+    parser.add_argument("--skinny-port", type=int, default=env_int("DLP_SKINNY_PORT", 2000))
+    parser.add_argument("--irc-port", type=int, default=env_int("DLP_IRC_PORT", 6667))
+    parser.add_argument("--xmpp-port", type=int, default=env_int("DLP_XMPP_PORT", 5222))
+    parser.add_argument("--telnet-port", type=int, default=env_int("DLP_TELNET_PORT", 23))
     parser.add_argument("--mgcp-endpoint", default=os.getenv("DLP_MGCP_ENDPOINT", "gw1"))
     parser.add_argument("--rss-path", default=os.getenv("DLP_RSS_PATH"))
     parser.add_argument("--open-sites", action="store_true", help="Open default public sites")
     parser.add_argument("--sites", default=os.getenv("DLP_SITES"), help="Comma-separated URLs")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.server_ip:
+        parser.error("server_ip is required (or set DLP_SERVER_IP)")
+    return args
 
 
 def main():
     args = parse_args()
     sites = [item.strip() for item in args.sites.split(",") if item.strip()] if args.sites else None
+    smtp_auth = not args.smtp_no_auth
+    ftp_passive = not args.ftp_active
     blaster = TrafficBlaster(
         args.server_ip,
         timeout=args.timeout,
@@ -599,6 +761,26 @@ def main():
         rss_path=args.rss_path,
         open_sites=args.open_sites or bool(sites),
         sites=sites,
+        sip_port=args.sip_port,
+        iax2_port=args.iax2_port,
+        mgcp_port=args.mgcp_port,
+        skinny_port=args.skinny_port,
+        smtp_port=args.smtp_port,
+        pop3_port=args.pop3_port,
+        imap_port=args.imap_port,
+        http_port=args.http_port,
+        https_port=args.https_port,
+        ftp_port=args.ftp_port,
+        irc_port=args.irc_port,
+        xmpp_port=args.xmpp_port,
+        radius_port=args.radius_port,
+        telnet_port=args.telnet_port,
+        smtp_starttls=args.smtp_starttls,
+        smtp_auth=smtp_auth,
+        pop3_ssl=args.pop3_ssl,
+        imap_ssl=args.imap_ssl,
+        ftp_passive=ftp_passive,
+        radius_raw=args.radius_raw,
     )
     blaster.blast_all()
 

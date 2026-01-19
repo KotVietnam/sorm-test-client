@@ -23,6 +23,12 @@ python3 -m pip install -r requirements.txt
 python3 traffic_generator.py <server_ip>
 ```
 
+Можно задать IP через `.env` (ключ `DLP_SERVER_IP`) и запускать без аргумента:
+
+```bash
+python3 traffic_generator.py
+```
+
 Пример для локального стенда:
 
 ```bash
@@ -63,13 +69,38 @@ python3 traffic_generator.py <server_ip> \
 python3 traffic_generator.py <server_ip> --sites "kremlin.ru,web.whatsapp.com,web.telegram.org,instagram.com"
 ```
 
+Порты и TLS/SSL (пример):
+
+```bash
+python3 traffic_generator.py <server_ip> \
+  --smtp-port 3025 --pop3-port 3110 --imap-port 3143 \
+  --smtp-starttls --pop3-ssl --imap-ssl \
+  --ftp-port 21 --ftp-active \
+  --radius-port 1812 --radius-raw
+```
+
+## .env
+
+Скрипт автоматически читает `.env` из текущей папки. Если файл лежит в другом месте, укажите путь:
+
+```bash
+python3 traffic_generator.py --env-file C:\\path\\to\\.env <server_ip>
+```
+
 Эквивалентные переменные окружения:
 
-- `DLP_DOMAIN`
+- `DLP_SERVER_IP`, `DLP_TIMEOUT`, `DLP_DOMAIN`
 - `DLP_MAIL_USER`, `DLP_MAIL_PASS`, `DLP_MAIL_FROM`, `DLP_MAIL_TO`
+- `DLP_SMTP_PORT`, `DLP_POP3_PORT`, `DLP_IMAP_PORT`
+- `DLP_SMTP_STARTTLS`, `DLP_SMTP_NO_AUTH`, `DLP_POP3_SSL`, `DLP_IMAP_SSL`
 - `DLP_FTP_USER`, `DLP_FTP_PASS`
+- `DLP_FTP_PORT`, `DLP_FTP_ACTIVE`
 - `DLP_RADIUS_SECRET`, `DLP_RADIUS_USER`, `DLP_RADIUS_PASS`
+- `DLP_RADIUS_PORT`, `DLP_RADIUS_RAW`
+- `DLP_HTTP_PORT`, `DLP_HTTPS_PORT`
 - `DLP_MGCP_ENDPOINT`
+- `DLP_SIP_PORT`, `DLP_IAX2_PORT`, `DLP_MGCP_PORT`, `DLP_SKINNY_PORT`
+- `DLP_IRC_PORT`, `DLP_XMPP_PORT`, `DLP_TELNET_PORT`
 - `DLP_RSS_PATH`
 - `DLP_SITES`
 
