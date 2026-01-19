@@ -5,11 +5,13 @@ import os
 import random
 import shutil
 import socket
+import select
 import struct
 import subprocess
 import tempfile
 import time
 import uuid
+import webbrowser
 
 import ftplib
 import imaplib
@@ -22,6 +24,11 @@ except Exception as exc:  # pragma: no cover - dependency availability
     TELNETLIB_IMPORT_ERROR = exc
 else:
     TELNETLIB_IMPORT_ERROR = None
+
+try:
+    import colorama
+except Exception:  # pragma: no cover - dependency availability
+    colorama = None
 
 try:
     import requests
@@ -62,7 +69,15 @@ class TrafficBlaster:
     COLOR_FAIL = "\033[31m"
     COLOR_WARN = "\033[33m"
     COLOR_INFO = "\033[34m"
+    COLOR_DIM = "\033[90m"
+    COLOR_BOLD = "\033[1m"
     COLOR_RESET = "\033[0m"
+    DEFAULT_PUBLIC_SITES = (
+        "https://kremlin.ru/",
+        "https://web.whatsapp.com/",
+        "https://web.telegram.org/",
+        "https://www.instagram.com/",
+    )
 
     def __init__(
         self,
@@ -80,6 +95,8 @@ class TrafficBlaster:
         radius_pass="dlppass",
         mgcp_endpoint="gw1",
         rss_path=None,
+        open_sites=False,
+        sites=None,
     ):
         self.server_ip = server_ip
         self.timeout = float(timeout)
@@ -95,7 +112,20 @@ class TrafficBlaster:
         self.radius_pass = radius_pass
         self.mgcp_endpoint = mgcp_endpoint
         self.rss_path = rss_path or os.path.join(os.getcwd(), "data", "client", "rss.xml")
+        self.open_sites = open_sites
+        self.sites = sites or list(self.DEFAULT_PUBLIC_SITES)
+        self.use_color = self._init_color()
+        self.stats = {"ok": 0, "warn": 0, "fail": 0, "info": 0}
         self.local_ip = self._detect_local_ip()
+
+    def _init_color(self):
+        if os.getenv("NO_COLOR"):
+            return False
+        if os.name == "nt":
+            if colorama is None:
+                return False
+            colorama.just_fix_windows_console()
+        return True
 
     def _detect_local_ip(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -107,19 +137,46 @@ class TrafficBlaster:
         finally:
             sock.close()
 
+    def _color(self, color):
+        return color if self.use_color else ""
+
+    def _header(self):
+        line = "=" * 62
+        title = "DLP TRAFFIC BLASTER"
+        target = f"Target: {self.server_ip}"
+        local = f"Local : {self.local_ip}"
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(self._color(self.COLOR_BOLD) + line + self._color(self.COLOR_RESET))
+        print(self._color(self.COLOR_BOLD) + f"{title:^62}" + self._color(self.COLOR_RESET))
+        print(self._color(self.COLOR_BOLD) + line + self._color(self.COLOR_RESET))
+        print(f"{target:<31}{local:<31}")
+        print(f"{'Started: ' + now:<62}")
+        print(line)
+
+    def _section(self, title):
+        bar = f"-- {title} " + "-" * max(0, 54 - len(title))
+        print(self._color(self.COLOR_INFO) + bar + self._color(self.COLOR_RESET))
+
     def _log(self, status, message, color):
-        print(f"{color}[{status}]{self.COLOR_RESET} {message}")
+        tag = f"[{status:^5}]"
+        stamp = time.strftime("%H:%M:%S")
+        colored_tag = self._color(color) + tag + self._color(self.COLOR_RESET)
+        print(f"{colored_tag} {stamp} | {message}")
 
     def _log_ok(self, message):
+        self.stats["ok"] += 1
         self._log("OK", message, self.COLOR_OK)
 
     def _log_fail(self, message):
+        self.stats["fail"] += 1
         self._log("FAIL", message, self.COLOR_FAIL)
 
     def _log_warn(self, message):
+        self.stats["warn"] += 1
         self._log("WARN", message, self.COLOR_WARN)
 
     def _log_info(self, message):
+        self.stats["info"] += 1
         self._log("INFO", message, self.COLOR_INFO)
 
     def _scapy_send(self, packet, label):
@@ -387,13 +444,37 @@ class TrafficBlaster:
             req["User-Name"] = self.radius_user
             req["User-Password"] = req.PwCrypt(self.radius_pass)
             req["NAS-IP-Address"] = self.local_ip
-            client.SendPacket(req)
-            self._log_ok("RADIUS Access-Request sent")
+            if hasattr(select, "poll"):
+                client.SendPacket(req)
+                self._log_ok("RADIUS Access-Request sent")
+            else:
+                self._log_warn("select.poll unavailable; sending RADIUS without response wait")
+                self._radius_send_fallback(req, port)
         except Exception as exc:
             self._log_fail(f"RADIUS failed ({exc})")
         finally:
             if dict_file and os.path.exists(dict_file):
                 os.unlink(dict_file)
+
+    def _radius_send_fallback(self, req, port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(self.timeout)
+        try:
+            packet = None
+            for method_name in ("RequestPacket", "Pack", "packet"):
+                if hasattr(req, method_name):
+                    method = getattr(req, method_name)
+                    packet = method() if callable(method) else method
+                    if packet:
+                        break
+            if packet is None:
+                raise RuntimeError("Unable to pack RADIUS request")
+            sock.sendto(packet, (self.server_ip, port))
+            self._log_ok("RADIUS Access-Request sent (no response wait)")
+        except Exception as exc:
+            self._log_fail(f"RADIUS fallback failed ({exc})")
+        finally:
+            sock.close()
 
     def telnet_session(self, port=23):
         if telnetlib is None:
@@ -416,24 +497,65 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"Telnet failed ({exc})")
 
+    def open_public_sites(self):
+        for url in self.sites:
+            normalized = self._normalize_url(url)
+            try:
+                opened = webbrowser.open_new_tab(normalized)
+                if opened:
+                    self._log_ok(f"Browser opened {normalized}")
+                else:
+                    self._log_warn(f"Browser refused {normalized}")
+            except Exception as exc:
+                self._log_fail(f"Browser open failed for {normalized} ({exc})")
+
+    def _normalize_url(self, url):
+        cleaned = url.strip()
+        if "://" not in cleaned:
+            return f"https://{cleaned}"
+        return cleaned
+
+    def _summary(self, started_at):
+        elapsed = time.time() - started_at
+        total = sum(self.stats.values())
+        line = "-" * 62
+        print(self._color(self.COLOR_DIM) + line + self._color(self.COLOR_RESET))
+        print(
+            f"Total: {total} | OK: {self.stats['ok']} | WARN: {self.stats['warn']} "
+            f"| FAIL: {self.stats['fail']} | INFO: {self.stats['info']} | "
+            f"Time: {elapsed:.1f}s"
+        )
+        print(line)
+
     def blast_all(self):
-        self._log_info(f"Target: {self.server_ip} (local {self.local_ip})")
+        started_at = time.time()
+        self._header()
+        self._section("VoIP")
         self.sip_options()
         self.h323_call()
         self.iax2_ping()
         self.mgcp_auep()
         self.skinny_keepalive()
+        self._section("Mail")
         self.smtp_send()
         self.pop3_check()
         self.imap_check()
+        self._section("Web")
         self.http_get()
         self.https_get()
         self.rss_download()
+        if self.open_sites:
+            self._section("Browser")
+            self.open_public_sites()
+        self._section("File Transfer")
         self.ftp_transfer()
+        self._section("Chat")
         self.irc_hello()
         self.xmpp_stream()
+        self._section("Misc")
         self.radius_access_request()
         self.telnet_session()
+        self._summary(started_at)
 
 
 def parse_args():
@@ -452,11 +574,14 @@ def parse_args():
     parser.add_argument("--radius-pass", default=os.getenv("DLP_RADIUS_PASS", "dlppass"))
     parser.add_argument("--mgcp-endpoint", default=os.getenv("DLP_MGCP_ENDPOINT", "gw1"))
     parser.add_argument("--rss-path", default=os.getenv("DLP_RSS_PATH"))
+    parser.add_argument("--open-sites", action="store_true", help="Open default public sites")
+    parser.add_argument("--sites", default=os.getenv("DLP_SITES"), help="Comma-separated URLs")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    sites = [item.strip() for item in args.sites.split(",") if item.strip()] if args.sites else None
     blaster = TrafficBlaster(
         args.server_ip,
         timeout=args.timeout,
@@ -472,6 +597,8 @@ def main():
         radius_pass=args.radius_pass,
         mgcp_endpoint=args.mgcp_endpoint,
         rss_path=args.rss_path,
+        open_sites=args.open_sites or bool(sites),
+        sites=sites,
     )
     blaster.blast_all()
 
