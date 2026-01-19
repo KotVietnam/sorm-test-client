@@ -15,7 +15,13 @@ import ftplib
 import imaplib
 import poplib
 import smtplib
-import telnetlib
+try:
+    import telnetlib
+except Exception as exc:  # pragma: no cover - dependency availability
+    telnetlib = None
+    TELNETLIB_IMPORT_ERROR = exc
+else:
+    TELNETLIB_IMPORT_ERROR = None
 
 try:
     import requests
@@ -390,6 +396,18 @@ class TrafficBlaster:
                 os.unlink(dict_file)
 
     def telnet_session(self, port=23):
+        if telnetlib is None:
+            self._log_warn(
+                f"telnetlib unavailable ({TELNETLIB_IMPORT_ERROR}); using raw socket"
+            )
+            try:
+                with socket.create_connection((self.server_ip, port), timeout=self.timeout) as sock:
+                    sock.sendall(b"\r\n")
+                    sock.sendall(b"exit\r\n")
+                self._log_ok("Telnet session opened/closed (raw socket)")
+            except Exception as exc:
+                self._log_fail(f"Telnet failed ({exc})")
+            return
         try:
             with telnetlib.Telnet(self.server_ip, port, timeout=self.timeout) as tn:
                 tn.write(b"\r\n")
