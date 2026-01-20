@@ -1,115 +1,102 @@
-# SORM Test Client
+# Клиент для тестирования СОРМ
 
-Клиентский генератор трафика для стенда DLP/DPI. Скрипт создает валидный трафик по разным протоколам, чтобы DPI мог его распознать.
+Этот скрипт (`traffic_generator.py`) предназначен для генерации различных видов сетевого трафика для тестирования систем СОРМ. Он эмулирует действия пользователя, такие как VoIP-звонки, отправка почты, обмен файлами, общение в мессенджерах и просмотр веб-сайтов.
 
-## Требования
+## Системные требования
 
-- Python 3
-- Библиотеки:
-  - `requests`
-  - `scapy`
-  - `pyrad`
-  - `slixmpp` (для XMPP)
-  - `colorama` (для красивого цветного вывода на Windows)
+*   **Операционная система:** Windows 10/11
+*   **Python:** Версия 3.8 или новее
+*   **Права администратора:** Требуются для корректной работы `scapy` при отправке некоторых видов пакетов (например, RTP).
 
-Установка:
+## Установка
 
-```bash
-python3 -m pip install -r requirements.txt
-```
+Для работы скрипта необходимо установить несколько компонентов: Python, специальные драйверы для перехвата трафика, VoIP-клиент YATE и Python-библиотеки.
 
-## Запуск
+### 1. Установка Python
 
-Скрипт максимально упрощен для "one-click" запуска.
+Если у вас не установлен Python, скачайте его с [официального сайта python.org](https://www.python.org/downloads/windows/).
 
-```bash
-# Запустит все тесты для сервера 127.0.0.1 и откроет сайты в браузере
-python3 traffic_generator.py
-```
+**Важно:** Во время установки обязательно отметьте галочку **"Add Python to PATH"**.
 
-При необходимости IP адрес сервера можно указать как аргумент:
+### 2. Установка Npcap
 
-```bash
-python3 traffic_generator.py 192.168.1.100
-```
+Библиотека `scapy`, используемая для генерации низкоуровневого трафика, требует драйвер Npcap в Windows.
 
-Также можно задать IP через `.env` (ключ `DLP_SERVER_IP`).
+1.  Перейдите на [страницу загрузки Npcap](https://npcap.com/#download).
+2.  Скачайте последнюю версию установщика.
+3.  Во время установки **обязательно** выберите опцию **"Install Npcap in WinPcap API-compatible Mode"**.
 
-## Что генерирует
+![Npcap Installation](https://npcap.com/guide/images/installer-compat.png)
 
-- **VoIP**: `SIP OPTIONS` и `REGISTER`, совершает полноценный звонок с RTP-аудиопотоком, H.323 (через утилиту), IAX2 ping, MGCP AUEP, Skinny keepalive.
-- **Почта**: SMTP отправка письма, POP3/IMAP проверка ящика.
-- **Web**: HTTP/HTTPS GET и скачивание `rss.xml`.
-- **Browser (по умолчанию)**: открытие публичных сайтов в браузере (`http://kremlin.ru`, `WhatsApp`, `Telegram`, `Instagram`, `Skype`).
-- **File Transfer**: FTP upload/download тестового файла.
-- **Chat**: 
-  - **IRC**: Подключается к серверу, заходит на канал `#test` и отправляет сообщение.
-  - **XMPP**: Регистрирует нового случайного пользователя, логинится и отправляет сообщение.
-- **Misc**: RADIUS Access‑Request, Telnet вход/выход.
+### 3. Установка YATE (для трафика H.323)
 
-## Параметры
+Для эмуляции звонков по протоколу H.323 используется консольный клиент YATE.
 
-Чтобы запустить скрипт без открытия браузера:
-```bash
-python3 traffic_generator.py 127.0.0.1 --open-sites=false
-```
+1.  Скачайте YATE с [официального сайта](https://yate.ro/download/). Вам потребуется Windows-версия.
+2.  Установите программу в любую директорию (например, `C:\Program Files\YATE`).
+3.  **Добавьте путь к исполняемым файлам YATE в системную переменную `PATH`:**
+    *   Нажмите `Win + R`, введите `sysdm.cpl` и нажмите Enter.
+    *   Перейдите на вкладку "Дополнительно" и нажмите "Переменные среды".
+    *   В разделе "Системные переменные" найдите переменную `Path` и нажмите "Изменить".
+    *   Нажмите "Создать" и добавьте путь к папке, где находится `yate-console.exe` (например, `C:\Program Files\YATE`).
+    *   Сохраните изменения.
 
-Другие параметры (порты, пользователи, пароли) можно переопределить через аргументы командной строки или переменные в `.env` файле.
+### 4. Установка Python-библиотек
 
-Пример:
-```bash
-python3 traffic_generator.py 127.0.0.1 \
-  --timeout 5 \
-  --domain dlp.local \
-  --mail-user dlp \
-  --mail-pass dlp \
-  --open-sites
-```
+1.  Склонируйте этот репозиторий на свой компьютер.
+2.  Откройте **командную строку (cmd) или PowerShell от имени администратора**.
+3.  Перейдите в директорию `sorm-test-client`:
+    ```powershell
+    cd path\to\sorm\sorm-test-client
+    ```
+4.  Установите все необходимые библиотеки с помощью команды:
+    ```powershell
+    pip install -r requirements.txt
+    ```
 
-Открыть конкретные сайты:
+## Настройка
 
-```bash
-python3 traffic_generator.py <server_ip> --sites "http://example.com,https://google.com"
-```
+Основная настройка клиента производится через файл `.env`.
 
-Пример с портами и TLS/SSL:
+1.  В папке `sorm-test-client` создайте файл с именем `.env`.
+2.  Добавьте в него следующую строку:
 
-```bash
-python3 traffic_generator.py <server_ip> \
-  --smtp-port 3025 --pop3-port 3110 --imap-port 3143 \
-  --smtp-starttls --pop3-ssl --imap-ssl \
-  --ftp-port 21 --ftp-active \
-  --radius-port 1812 --radius-raw
-```
+    ```env
+    # IP-адрес сервера, на котором запущен sorm-test-server
+    DLP_SERVER_IP="XXX.XXX.XXX.XXX"
+    ```
 
-## .env
+3.  Замените `XXX.XXX.XXX.XXX` на реальный "белый" IP-адрес вашего сервера.
 
-Скрипт автоматически читает `.env` из текущей папки. Если файл лежит в другом месте, укажите путь:
+## Использование
 
-```bash
-python3 traffic_generator.py --env-file C:\\path\\to\\.env
-```
+1.  Убедитесь, что сервер `sorm-test-server` запущен.
+2.  Откройте **командную строку (cmd) или PowerShell от имени администратора**.
+3.  Перейдите в директорию `sorm-test-client`.
+4.  Запустите скрипт:
 
-Эквивалентные переменные окружения:
+    ```powershell
+    python traffic_generator.py
+    ```
 
-- `DLP_SERVER_IP`, `DLP_TIMEOUT`, `DLP_DOMAIN`
-- `DLP_MAIL_USER`, `DLP_MAIL_PASS`, `DLP_MAIL_FROM`, `DLP_MAIL_TO`
-- `DLP_SMTP_PORT`, `DLP_POP3_PORT`, `DLP_IMAP_PORT`
-- `DLP_SMTP_STARTTLS`, `DLP_SMTP_NO_AUTH`, `DLP_POP3_SSL`, `DLP_IMAP_SSL`
-- `DLP_FTP_USER`, `DLP_FTP_PASS`
-- `DLP_FTP_PORT`, `DLP_FTP_ACTIVE`
-- `DLP_RADIUS_SECRET`, `DLP_RADIUS_USER`, `DLP_RADIUS_PASS`
-- `DLP_RADIUS_PORT`, `DLP_RADIUS_RAW`
-- `DLP_HTTP_PORT`, `DLP_HTTPS_PORT`
-- `DLP_MGCP_ENDPOINT`
-- `DLP_SIP_PORT`, `DLP_IAX2_PORT`, `DLP_MGCP_PORT`, `DLP_SKINNY_PORT`
-- `DLP_IRC_PORT`, `DLP_XMPP_PORT`, `DLP_TELNET_PORT`
-- `DLP_RSS_PATH`
-- `DLP_SITES`
+Скрипт начнет последовательно генерировать трафик для всех поддерживаемых протоколов. Для некоторых протоколов (WhatsApp, Telegram и т.д.) будут открываться вкладки в браузере.
 
-## Примечания
+### Параметры запуска
 
-- Для отправки сырого трафика scapy может потребоваться запуск с повышенными правами.
-- H.323 использует внешнюю утилиту `yate-console` или `simph323`; если не найдена — будет предупреждение.
-- Цветной вывод можно отключить через `NO_COLOR=1`.
-- Значения по умолчанию совпадают с конфигами проекта `sorm-test-server`.
+Вы можете управлять поведением скрипта с помощью аргументов командной строки.
+
+*   `python traffic_generator.py [IP-адрес сервера]` - можно передать IP-адрес напрямую, без использования `.env` файла.
+*   `--open-sites` - принудительно открывать сайты в браузере. По умолчанию скрипт делает это автоматически при запуске без других параметров.
+*   `--timeout 10.0` - изменить таймаут ожидания ответа от сервера (в секундах).
+
+Полный список параметров можно посмотреть, выполнив `python traffic_generator.py --help`.
+
+## Поддерживаемые протоколы
+
+Скрипт генерирует следующий трафик:
+- **Веб-браузинг:** HTTP, HTTPS, RSS, а также открытие сайтов WhatsApp, Telegram, Instagram, Skype.
+- **VoIP:** SIP (OPTIONS, REGISTER, полноценный звонок с RTP), H.323, IAX2, MGCP, Skinny.
+- **Электронная почта:** SMTP (отправка письма с вложением), POP3, IMAP.
+- **Мессенджеры:** XMPP (регистрация и отправка сообщения), IRC.
+- **Передача файлов:** FTP (загрузка и скачивание файла).
+- **Другое:** Telnet, RADIUS.
