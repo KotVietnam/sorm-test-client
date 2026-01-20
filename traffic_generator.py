@@ -13,10 +13,15 @@ import time
 import uuid
 import webbrowser
 
+import asyncio
 import ftplib
 import imaplib
 import poplib
 import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
 try:
     import telnetlib
 except Exception as exc:  # pragma: no cover - dependency availability
@@ -24,6 +29,14 @@ except Exception as exc:  # pragma: no cover - dependency availability
     TELNETLIB_IMPORT_ERROR = exc
 else:
     TELNETLIB_IMPORT_ERROR = None
+
+try:
+    import slixmpp
+except Exception as exc:  # pragma: no cover - dependency availability
+    slixmpp = None
+    SLIXMPP_IMPORT_ERROR = exc
+else:
+    SLIXMPP_IMPORT_ERROR = None
 
 try:
     import colorama
@@ -118,10 +131,11 @@ class TrafficBlaster:
     COLOR_BOLD = "\033[1m"
     COLOR_RESET = "\033[0m"
     DEFAULT_PUBLIC_SITES = (
-        "https://kremlin.ru/",
+        "http://kremlin.ru",
         "https://web.whatsapp.com/",
         "https://web.telegram.org/",
         "https://www.instagram.com/",
+        "https://web.skype.com/",
     )
 
     def __init__(
@@ -213,6 +227,8 @@ class TrafficBlaster:
         return True
 
     def _detect_local_ip(self):
+        if not self.server_ip:
+            return "127.0.0.1"
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.connect((self.server_ip, 9))
@@ -228,7 +244,7 @@ class TrafficBlaster:
     def _header(self):
         line = "=" * 62
         title = "DLP TRAFFIC BLASTER"
-        target = f"Target: {self.server_ip}"
+        target = f"Target: {self.server_ip or 'N/A'}"
         local = f"Local : {self.local_ip}"
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         print(self._color(self.COLOR_BOLD) + line + self._color(self.COLOR_RESET))
@@ -268,6 +284,9 @@ class TrafficBlaster:
         if send is None:
             self._log_fail(f"{label}: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
+        if not self.server_ip:
+            self._log_fail(f"{label}: server IP not set")
+            return
         try:
             send(packet, verbose=0)
             self._log_ok(f"{label}: packet sent")
@@ -276,7 +295,31 @@ class TrafficBlaster:
         except Exception as exc:
             self._log_fail(f"{label}: send failed ({exc})")
 
+    def _generate_ulaw_wav(self, path, duration=1, sample_rate=8000):
+        """Generates a silent mono u-law WAV file."""
+        num_samples = duration * sample_rate
+        chunk_size = num_samples + 36
+        sub_chunk_size = 16
+        bits_per_sample = 8
+        byte_rate = sample_rate * 1 * bits_per_sample // 8
+        block_align = 1
+        audio_format = 7  # u-law
+
+        with open(path, "wb") as f:
+            f.write(b"RIFF")
+            f.write(struct.pack("<L", chunk_size))
+            f.write(b"WAVE")
+            f.write(b"fmt ")
+            f.write(struct.pack("<LHHLLHH", sub_chunk_size, audio_format, 1, sample_rate, byte_rate, block_align, bits_per_sample))
+            f.write(b"data")
+            f.write(struct.pack("<L", num_samples))
+            f.write(b"\xff" * num_samples) # u-law silence is 0xff
+        self._log_info(f"Generated silent u-law WAV at {path}")
+
     def sip_options(self, port=None):
+        if not self.server_ip:
+            self._log_fail("SIP OPTIONS: server IP not set")
+            return
         port = port or self.sip_port
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(self.timeout)
@@ -310,7 +353,177 @@ class TrafficBlaster:
         finally:
             sock.close()
 
+    def sip_register(self, user="1001", password="pass1001", port=None):
+        if not self.server_ip:
+            self._log_fail(f"SIP REGISTER {user}: server IP not set")
+            return
+        port = port or self.sip_port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(self.timeout)
+        target = self.server_ip
+        try:
+            sock.connect((self.server_ip, port))
+            local_ip, local_port = sock.getsockname()
+            branch = f"z9hG4bK{uuid.uuid4().hex}"
+            call_id = uuid.uuid4().hex
+            tag = random.randint(1000, 9999)
+            msg = (
+                f"REGISTER sip:{target} SIP/2.0\r\n"
+                f"Via: SIP/2.0/UDP {local_ip}:{local_port};branch={branch};rport\r\n"
+                "Max-Forwards: 70\r\n"
+                f"From: <sip:{user}@{target}>;tag={tag}\r\n"
+                f"To: <sip:{user}@{target}>\r\n"
+                f"Call-ID: {call_id}\r\n"
+                "CSeq: 1 REGISTER\r\n"
+                f"Contact: <sip:{user}@{local_ip}:{local_port}>\r\n"
+                "Expires: 3600\r\n"
+                "Content-Length: 0\r\n\r\n"
+            )
+            sock.send(msg.encode("ascii", "ignore"))
+            self._log_ok(f"SIP REGISTER for {user} sent")
+            try:
+                sock.recv(4096)
+                self._log_ok(f"SIP REGISTER response for {user} received")
+            except socket.timeout:
+                self._log_warn(f"SIP REGISTER response for {user} timeout")
+        except Exception as exc:
+            self._log_fail(f"SIP REGISTER for {user} failed ({exc})")
+        finally:
+            sock.close()
+
+    async def sip_call(self, user="1001", dest="999", port=None, rtp_port=16384):
+        if not self.server_ip or send is None:
+            self._log_fail(f"SIP Call: server IP not set or scapy unavailable")
+            return
+        
+        sip_port = port or self.sip_port
+        target = self.server_ip
+        local_ip = self.local_ip
+        from_tag = uuid.uuid4().hex
+        call_id = uuid.uuid4().hex
+        cseq = random.randint(100, 900)
+        
+        # Sockets
+        sip_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sip_sock.settimeout(self.timeout)
+        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        
+        try:
+            sip_sock.bind((local_ip, 0))
+            local_sip_port = sip_sock.getsockname()[1]
+            rtp_sock.bind((local_ip, rtp_port))
+
+            # --- INVITE ---
+            branch = f"z9hG4bK{uuid.uuid4().hex}"
+            sdp = (
+                "v=0\r\n"
+                f"o={user} {int(time.time())} {int(time.time())} IN IP4 {local_ip}\r\n"
+                "s=DLP Call\r\n"
+                f"c=IN IP4 {local_ip}\r\n"
+                "t=0 0\r\n"
+                f"m=audio {rtp_port} RTP/AVP 0\r\n"
+                "a=rtpmap:0 PCMU/8000\r\n"
+                "a=sendrecv\r\n"
+            )
+            invite = (
+                f"INVITE sip:{dest}@{target} SIP/2.0\r\n"
+                f"Via: SIP/2.0/UDP {local_ip}:{local_sip_port};branch={branch};rport\r\n"
+                "Max-Forwards: 70\r\n"
+                f"From: <sip:{user}@{target}>;tag={from_tag}\r\n"
+                f"To: <sip:{dest}@{target}>\r\n"
+                f"Contact: <sip:{user}@{local_ip}:{local_sip_port}>\r\n"
+                f"Call-ID: {call_id}\r\n"
+                f"CSeq: {cseq} INVITE\r\n"
+                "Content-Type: application/sdp\r\n"
+                f"Content-Length: {len(sdp)}\r\n\r\n"
+                f"{sdp}"
+            )
+            sip_sock.sendto(invite.encode(), (target, sip_port))
+            self._log_ok(f"SIP INVITE sent to {dest}")
+
+            # --- Wait for 200 OK ---
+            to_tag = None
+            server_rtp_port = None
+            for _ in range(5): # Try receiving a few times
+                resp = sip_sock.recv(4096).decode()
+                if "200 OK" in resp and "CSeq" in resp and "INVITE" in resp:
+                    to_tag = resp.split("To:")[1].split("tag=")[1].split("\r\n")[0].strip()
+                    server_rtp_port = int(resp.split("m=audio ")[1].split(" ")[0])
+                    self._log_ok(f"SIP 200 OK received, server RTP port: {server_rtp_port}")
+                    break
+            
+            if not to_tag or not server_rtp_port:
+                raise RuntimeError("Did not receive a valid 200 OK for INVITE")
+
+            # --- ACK ---
+            cseq += 1
+            ack = (
+                f"ACK sip:{dest}@{target} SIP/2.0\r\n"
+                f"Via: SIP/2.0/UDP {local_ip}:{local_sip_port};branch={branch};rport\r\n"
+                "Max-Forwards: 70\r\n"
+                f"From: <sip:{user}@{target}>;tag={from_tag}\r\n"
+                f"To: <sip:{dest}@{target}>;tag={to_tag}\r\n"
+                f"Call-ID: {call_id}\r\n"
+                f"CSeq: {cseq} ACK\r\n"
+                "Content-Length: 0\r\n\r\n"
+            )
+            sip_sock.sendto(ack.encode(), (target, sip_port))
+            self._log_ok("SIP ACK sent, call established")
+
+            # --- RTP ---
+            wav_path = os.path.join(tempfile.gettempdir(), "silent.wav")
+            self._generate_ulaw_wav(wav_path)
+            with open(wav_path, "rb") as f:
+                wav_data = f.read()[44:] # Skip header
+            
+            rtp_stream = []
+            seq = random.randint(0, 65535)
+            ts = random.randint(0, 4294967295)
+            ssrc = random.randint(0, 4294967295)
+
+            for i in range(0, len(wav_data), 160):
+                chunk = wav_data[i:i+160]
+                rtp_packet = IP(dst=target)/UDP(sport=rtp_port, dport=server_rtp_port)/Raw(
+                    struct.pack("!BBHII", 128, 0, seq, ts, ssrc) + chunk
+                )
+                rtp_stream.append(rtp_packet)
+                seq += 1
+                ts += 160
+            
+            self._log_info(f"Sending {len(rtp_stream)} RTP packets...")
+            for packet in rtp_stream:
+                send(packet, verbose=0)
+                await asyncio.sleep(0.02)
+            self._log_ok("RTP stream sent")
+
+            # --- BYE ---
+            await asyncio.sleep(1) # Keep call alive for a second
+            cseq += 1
+            branch = f"z9hG4bK{uuid.uuid4().hex}"
+            bye = (
+                f"BYE sip:{dest}@{target} SIP/2.0\r\n"
+                f"Via: SIP/2.0/UDP {local_ip}:{local_sip_port};branch={branch};rport\r\n"
+                "Max-Forwards: 70\r\n"
+                f"From: <sip:{user}@{target}>;tag={from_tag}\r\n"
+                f"To: <sip:{dest}@{target}>;tag={to_tag}\r\n"
+                f"Call-ID: {call_id}\r\n"
+                f"CSeq: {cseq} BYE\r\n"
+                "Content-Length: 0\r\n\r\n"
+            )
+            sip_sock.sendto(bye.encode(), (target, sip_port))
+            self._log_ok("SIP BYE sent")
+
+        except Exception as exc:
+            self._log_fail(f"SIP Call failed ({exc})")
+        finally:
+            sip_sock.close()
+            rtp_sock.close()
+
+
     def h323_call(self):
+        if not self.server_ip:
+            self._log_fail("H.323: server IP not set")
+            return
         tool = shutil.which("yate-console") or shutil.which("simph323")
         if not tool:
             self._log_warn("H.323 tool not found (yate-console/simph323)")
@@ -346,6 +559,9 @@ class TrafficBlaster:
         if send is None:
             self._log_fail(f"IAX2 ping: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
+        if not self.server_ip:
+            self._log_fail("IAX2 ping: server IP not set")
+            return
         src_call = random.randint(1, 0x7FFF)
         dst_call = 0
         timestamp = int(time.time() * 1000) & 0xFFFFFFFF
@@ -375,6 +591,9 @@ class TrafficBlaster:
         if send is None:
             self._log_fail(f"MGCP AUEP: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
+        if not self.server_ip:
+            self._log_fail("MGCP AUEP: server IP not set")
+            return
         msg = f"AUEP 1234 {self.mgcp_endpoint} MGCP 1.0\r\n\r\n"
         packet = (
             IP(dst=self.server_ip)
@@ -388,6 +607,9 @@ class TrafficBlaster:
         if send is None:
             self._log_fail(f"Skinny keepalive: scapy unavailable ({SCAPY_IMPORT_ERROR})")
             return
+        if not self.server_ip:
+            self._log_fail("Skinny keepalive: server IP not set")
+            return
         payload = struct.pack("<II", 4, 0x00000000)
         packet = (
             IP(dst=self.server_ip)
@@ -397,8 +619,32 @@ class TrafficBlaster:
         self._scapy_send(packet, "Skinny keepalive")
 
     def smtp_send(self, port=None):
+        if not self.server_ip:
+            self._log_fail("SMTP: server IP not set")
+            return
         port = port or self.smtp_port
         try:
+            msg = MIMEMultipart()
+            msg["From"] = self.mail_from
+            msg["To"] = self.mail_to
+            msg["Subject"] = "CONFIDENTIAL"
+            body = "DLP test message with attachment."
+            msg.attach(MIMEText(body, "plain"))
+
+            # Attach file
+            attachment_path = os.path.join(os.path.dirname(__file__), "data", "sample.txt")
+            if os.path.exists(attachment_path):
+                with open(attachment_path, "rb") as attachment:
+                    part = MIMEBase("application", "octet-stream")
+                    part.set_payload(attachment.read())
+                encoders.encode_base64(part)
+                part.add_header(
+                    "Content-Disposition",
+                    f"attachment; filename= {os.path.basename(attachment_path)}",
+                )
+                msg.attach(part)
+                self._log_info("SMTP: prepared email with attachment")
+
             with smtplib.SMTP(self.server_ip, port, timeout=self.timeout) as smtp:
                 smtp.ehlo()
                 if self.smtp_starttls:
@@ -409,18 +655,16 @@ class TrafficBlaster:
                         smtp.login(self.mail_user, self.mail_pass)
                     except smtplib.SMTPException as exc:
                         self._log_warn(f"SMTP auth skipped ({exc})")
-                msg = (
-                    f"From: {self.mail_from}\r\n"
-                    f"To: {self.mail_to}\r\n"
-                    "Subject: CONFIDENTIAL\r\n\r\n"
-                    "DLP test message."
-                )
-                smtp.sendmail(self.mail_from, [self.mail_to], msg)
+                
+                smtp.sendmail(self.mail_from, [self.mail_to], msg.as_string())
             self._log_ok("SMTP mail sent")
         except Exception as exc:
             self._log_fail(f"SMTP failed ({exc})")
 
     def pop3_check(self, port=None):
+        if not self.server_ip:
+            self._log_fail("POP3: server IP not set")
+            return
         port = port or self.pop3_port
         try:
             pop_class = poplib.POP3_SSL if self.pop3_ssl else poplib.POP3
@@ -434,6 +678,9 @@ class TrafficBlaster:
             self._log_fail(f"POP3 failed ({exc})")
 
     def imap_check(self, port=None):
+        if not self.server_ip:
+            self._log_fail("IMAP: server IP not set")
+            return
         port = port or self.imap_port
         try:
             imap_class = imaplib.IMAP4_SSL if self.imap_ssl else imaplib.IMAP4
@@ -446,6 +693,9 @@ class TrafficBlaster:
             self._log_fail(f"IMAP failed ({exc})")
 
     def http_get(self, port=None):
+        if not self.server_ip:
+            self._log_fail("HTTP GET: server IP not set")
+            return
         if requests is None:
             self._log_fail(f"HTTP GET: requests unavailable ({REQUESTS_IMPORT_ERROR})")
             return
@@ -461,6 +711,9 @@ class TrafficBlaster:
             self._log_fail(f"HTTP GET failed ({exc})")
 
     def https_get(self, port=None):
+        if not self.server_ip:
+            self._log_fail("HTTPS GET: server IP not set")
+            return
         if requests is None:
             self._log_fail(f"HTTPS GET: requests unavailable ({REQUESTS_IMPORT_ERROR})")
             return
@@ -476,6 +729,9 @@ class TrafficBlaster:
             self._log_fail(f"HTTPS GET failed ({exc})")
 
     def rss_download(self, port=None):
+        if not self.server_ip:
+            self._log_fail("RSS download: server IP not set")
+            return
         if requests is None:
             self._log_fail(f"RSS download: requests unavailable ({REQUESTS_IMPORT_ERROR})")
             return
@@ -494,18 +750,40 @@ class TrafficBlaster:
             self._log_fail(f"RSS download failed ({exc})")
 
     def ftp_transfer(self, port=None):
+        if not self.server_ip:
+            self._log_fail("FTP: server IP not set")
+            return
         port = port or self.ftp_port
-        data = f"dlp test {time.time()}\n".encode("ascii")
+        
+        local_path = os.path.join(os.path.dirname(__file__), "data", "sample.txt")
+        remote_filename = "uploaded_sample.txt"
+        
+        if not os.path.exists(local_path):
+            self._log_fail(f"FTP: sample file not found at {local_path}")
+            return
+            
         ftp = ftplib.FTP()
         try:
             ftp.connect(self.server_ip, port, timeout=self.timeout)
             ftp.login(self.ftp_user, self.ftp_pass)
             ftp.set_pasv(self.ftp_passive)
-            ftp.storbinary("STOR dlp_test.txt", io.BytesIO(data))
-            self._log_ok("FTP upload completed")
+
+            # Upload
+            with open(local_path, "rb") as f:
+                ftp.storbinary(f"STOR {remote_filename}", f)
+            self._log_ok(f"FTP upload of {os.path.basename(local_path)} completed")
+
+            # Download and verify
             downloaded = io.BytesIO()
-            ftp.retrbinary("RETR dlp_test.txt", downloaded.write)
-            self._log_ok("FTP download completed")
+            ftp.retrbinary(f"RETR {remote_filename}", downloaded.write)
+            downloaded.seek(0)
+            with open(local_path, "rb") as f:
+                original_content = f.read()
+            if downloaded.read() == original_content:
+                self._log_ok("FTP download completed and content verified")
+            else:
+                self._log_fail("FTP verification failed: content mismatch")
+
             ftp.quit()
         except Exception as exc:
             self._log_fail(f"FTP transfer failed ({exc})")
@@ -516,33 +794,100 @@ class TrafficBlaster:
                 pass
 
     def irc_hello(self, port=None):
+        if not self.server_ip:
+            self._log_fail("IRC: server IP not set")
+            return
         port = port or self.irc_port
+        nick = f"dlp{random.randint(1000, 9999)}"
+        channel = "#test"
         try:
             with socket.create_connection((self.server_ip, port), timeout=self.timeout) as sock:
-                nick = f"dlp{random.randint(1000, 9999)}"
-                payload = f"NICK {nick}\r\nUSER {nick} 0 * :{nick}\r\n"
-                sock.sendall(payload.encode("ascii"))
-            self._log_ok("IRC NICK/USER sent")
+                sock.settimeout(self.timeout)
+                sock.sendall(f"NICK {nick}\r\n".encode("ascii"))
+                sock.sendall(f"USER {nick} 0 * :{nick}\r\n".encode("ascii"))
+                
+                # Wait for PING and reply with PONG
+                while True:
+                    data = sock.recv(1024).decode("ascii", "ignore")
+                    if "001" in data:
+                        self._log_ok("IRC registration successful")
+                        break
+                    if data.startswith("PING"):
+                        sock.sendall(f"PONG {data.split(':')[1]}\r\n".encode("ascii"))
+                
+                sock.sendall(f"JOIN {channel}\r\n".encode("ascii"))
+                self._log_ok(f"IRC joined channel {channel}")
+                
+                sock.sendall(f"PRIVMSG {channel} :Hello from the traffic blaster!\r\n".encode("ascii"))
+                self._log_ok(f"IRC message sent to {channel}")
+                
+                sock.sendall(f"QUIT :Bye\r\n".encode("ascii"))
+
         except Exception as exc:
             self._log_fail(f"IRC failed ({exc})")
 
-    def xmpp_stream(self, port=None):
+    async def xmpp_login_and_send(self, port=None):
+        if not self.server_ip:
+            self._log_fail("XMPP: server IP not set")
+            return
+        if slixmpp is None:
+            self._log_fail(f"XMPP: slixmpp unavailable ({SLIXMPP_IMPORT_ERROR})")
+            return
+
+        user = f"dlp-user-{uuid.uuid4().hex[:8]}"
+        password = uuid.uuid4().hex
+        jid = f"{user}@{self.domain}"
+        recipient = f"admin@{self.domain}"
         port = port or self.xmpp_port
+
+        class XMPPBot(slixmpp.ClientXMPP):
+            def __init__(self, jid, password, blaster):
+                super().__init__(jid, password)
+                self.blaster = blaster
+                self.add_event_handler("session_start", self.start)
+                self.add_event_handler("register", self.register)
+                self.register_plugin('xep_0030') # Service Discovery
+                self.register_plugin('xep_0004') # Data Forms
+                self.register_plugin('xep_0066') # Out-of-band Data
+                self.register_plugin('xep_0077') # In-band Registration
+
+            async def register(self, iq):
+                resp = self.Iq()
+                resp['type'] = 'set'
+                resp['register']['username'] = self.boundjid.user
+                resp['register']['password'] = self.password
+                try:
+                    await resp.send()
+                    self.blaster._log_ok(f"XMPP registered user {self.boundjid.user}")
+                except slixmpp.exceptions.IqError as e:
+                    self.blaster._log_fail(f"XMPP registration failed: {e.iq['error']['text']}")
+                    self.disconnect()
+                except slixmpp.exceptions.IqTimeout:
+                    self.blaster._log_fail("XMPP registration timed out")
+                    self.disconnect()
+
+            async def start(self, event):
+                self.send_presence()
+                await self.get_roster()
+                self.blaster._log_ok(f"XMPP session started for {self.boundjid.bare}")
+                self.send_message(mto=recipient, mbody="XMPP test message from traffic blaster")
+                self.blaster._log_ok(f"XMPP message sent to {recipient}")
+                self.disconnect()
+
+        xmpp = XMPPBot(jid, password, self)
         try:
-            with socket.create_connection((self.server_ip, port), timeout=self.timeout) as sock:
-                stream = (
-                    "<?xml version='1.0'?>"
-                    "<stream:stream to='{domain}' "
-                    "version='1.0' "
-                    "xmlns='jabber:client' "
-                    "xmlns:stream='http://etherx.jabber.org/streams'>"
-                ).format(domain=self.domain)
-                sock.sendall(stream.encode("ascii"))
-            self._log_ok("XMPP stream started")
+            # Connect using the IP, but tell slixmpp the domain name for the certificate
+            xmpp.connect(address=(self.server_ip, port))
+            xmpp.process(timeout=self.timeout * 2)
+        except slixmpp.exceptions.IqTimeout:
+            self._log_warn("XMPP connection timed out")
         except Exception as exc:
             self._log_fail(f"XMPP failed ({exc})")
 
     def radius_access_request(self, port=None):
+        if not self.server_ip:
+            self._log_fail("RADIUS: server IP not set")
+            return
         port = port or self.radius_port
         if Client is None:
             self._log_fail(f"RADIUS: pyrad unavailable ({PYRAD_IMPORT_ERROR})")
@@ -603,6 +948,9 @@ class TrafficBlaster:
             sock.close()
 
     def telnet_session(self, port=None):
+        if not self.server_ip:
+            self._log_fail("Telnet: server IP not set")
+            return
         port = port or self.telnet_port
         if telnetlib is None:
             self._log_warn(
@@ -625,6 +973,7 @@ class TrafficBlaster:
             self._log_fail(f"Telnet failed ({exc})")
 
     def open_public_sites(self):
+        self._section("Browser")
         for url in self.sites:
             normalized = self._normalize_url(url)
             try:
@@ -657,8 +1006,13 @@ class TrafficBlaster:
     def blast_all(self):
         started_at = time.time()
         self._header()
-        self._section("VoIP")
+        if self.open_sites:
+            self.open_public_sites()
+        
+        # Synchronous tests
+        self._section("VoIP (Sync)")
         self.sip_options()
+        self.sip_register()
         self.h323_call()
         self.iax2_ping()
         self.mgcp_auep()
@@ -671,18 +1025,25 @@ class TrafficBlaster:
         self.http_get()
         self.https_get()
         self.rss_download()
-        if self.open_sites:
-            self._section("Browser")
-            self.open_public_sites()
         self._section("File Transfer")
         self.ftp_transfer()
-        self._section("Chat")
+        self._section("Chat (Sync)")
         self.irc_hello()
-        self.xmpp_stream()
         self._section("Misc")
         self.radius_access_request()
         self.telnet_session()
+
+        # Asynchronous tests
+        self._section("Async Tasks (VoIP Call, XMPP)")
+        asyncio.run(self.run_async_tasks())
+
         self._summary(started_at)
+
+    async def run_async_tasks(self):
+        await asyncio.gather(
+            self.sip_call(),
+            self.xmpp_login_and_send()
+        )
 
 
 def parse_args():
@@ -696,7 +1057,7 @@ def parse_args():
         "server_ip",
         nargs="?",
         default=os.getenv("DLP_SERVER_IP"),
-        help="DLP-Test-Lab server IP address (or set DLP_SERVER_IP)",
+        help="DLP-Test-Lab server IP address (default: 127.0.0.1 if not set)",
     )
     parser.add_argument("--timeout", type=float, default=env_float("DLP_TIMEOUT", 5.0), help="Socket timeout in seconds")
     parser.add_argument("--domain", default=os.getenv("DLP_DOMAIN", "dlp.local"))
@@ -733,19 +1094,23 @@ def parse_args():
     parser.add_argument("--rss-path", default=os.getenv("DLP_RSS_PATH"))
     parser.add_argument("--open-sites", action="store_true", help="Open default public sites")
     parser.add_argument("--sites", default=os.getenv("DLP_SITES"), help="Comma-separated URLs")
-    args = parser.parse_args()
-    if not args.server_ip:
-        parser.error("server_ip is required (or set DLP_SERVER_IP)")
-    return args
+    return parser.parse_args(), parser
 
 
 def main():
-    args = parse_args()
+    args, parser = parse_args()
+    is_default_run = not any(
+        arg for arg in sys.argv[1:] if not arg.startswith("--env-file")
+    )
+    server_ip = args.server_ip or "127.0.0.1"
+    open_sites = args.open_sites or is_default_run
+    if not server_ip:
+        parser.error("server_ip is required (or set DLP_SERVER_IP)")
     sites = [item.strip() for item in args.sites.split(",") if item.strip()] if args.sites else None
     smtp_auth = not args.smtp_no_auth
     ftp_passive = not args.ftp_active
     blaster = TrafficBlaster(
-        args.server_ip,
+        server_ip,
         timeout=args.timeout,
         domain=args.domain,
         mail_user=args.mail_user,
@@ -759,7 +1124,7 @@ def main():
         radius_pass=args.radius_pass,
         mgcp_endpoint=args.mgcp_endpoint,
         rss_path=args.rss_path,
-        open_sites=args.open_sites or bool(sites),
+        open_sites=open_sites,
         sites=sites,
         sip_port=args.sip_port,
         iax2_port=args.iax2_port,
@@ -786,4 +1151,5 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
     main()

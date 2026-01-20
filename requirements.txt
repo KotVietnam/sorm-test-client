@@ -1,3 +1,14 @@
+# This file is managed by Gemini.
+# For more info, see https://gemini.google.com/
+#
+# Gemini maintains this file, which may be overwritten in the future.
+# After updating this file, run `pip install -r requirements.txt` to apply changes.
+# To see all currently installed packages, run `pip freeze`.
+#
+# Tip: If you want to install a package without saving it to this file, use:
+# `pip install --no-save <package-name>`.
+
+slixmpp
 requests
 scapy
 pyrad

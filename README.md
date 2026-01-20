@@ -9,6 +9,7 @@
   - `requests`
   - `scapy`
   - `pyrad`
+  - `slixmpp` (для XMPP)
   - `colorama` (для красивого цветного вывода на Windows)
 
 Установка:
@@ -19,57 +20,59 @@ python3 -m pip install -r requirements.txt
 
 ## Запуск
 
-```bash
-python3 traffic_generator.py <server_ip>
-```
-
-Можно задать IP через `.env` (ключ `DLP_SERVER_IP`) и запускать без аргумента:
+Скрипт максимально упрощен для "one-click" запуска.
 
 ```bash
+# Запустит все тесты для сервера 127.0.0.1 и откроет сайты в браузере
 python3 traffic_generator.py
 ```
 
-Пример для локального стенда:
+При необходимости IP адрес сервера можно указать как аргумент:
 
 ```bash
-python3 traffic_generator.py 127.0.0.1
+python3 traffic_generator.py 192.168.1.100
 ```
+
+Также можно задать IP через `.env` (ключ `DLP_SERVER_IP`).
 
 ## Что генерирует
 
-- **VoIP**: SIP OPTIONS, H.323 (через утилиту), IAX2 ping, MGCP AUEP, Skinny keepalive.
+- **VoIP**: `SIP OPTIONS` и `REGISTER`, совершает полноценный звонок с RTP-аудиопотоком, H.323 (через утилиту), IAX2 ping, MGCP AUEP, Skinny keepalive.
 - **Почта**: SMTP отправка письма, POP3/IMAP проверка ящика.
 - **Web**: HTTP/HTTPS GET и скачивание `rss.xml`.
-- **Browser (опционально)**: открытие публичных сайтов в браузере.
+- **Browser (по умолчанию)**: открытие публичных сайтов в браузере (`http://kremlin.ru`, `WhatsApp`, `Telegram`, `Instagram`, `Skype`).
 - **File Transfer**: FTP upload/download тестового файла.
-- **Chat**: IRC NICK/USER, XMPP старт XML‑стрима.
+- **Chat**: 
+  - **IRC**: Подключается к серверу, заходит на канал `#test` и отправляет сообщение.
+  - **XMPP**: Регистрирует нового случайного пользователя, логинится и отправляет сообщение.
 - **Misc**: RADIUS Access‑Request, Telnet вход/выход.
 
 ## Параметры
 
+Чтобы запустить скрипт без открытия браузера:
 ```bash
-python3 traffic_generator.py <server_ip> \
+python3 traffic_generator.py 127.0.0.1 --open-sites=false
+```
+
+Другие параметры (порты, пользователи, пароли) можно переопределить через аргументы командной строки или переменные в `.env` файле.
+
+Пример:
+```bash
+python3 traffic_generator.py 127.0.0.1 \
   --timeout 5 \
   --domain dlp.local \
   --mail-user dlp \
   --mail-pass dlp \
-  --ftp-user dlp \
-  --ftp-pass dlp \
-  --radius-secret testing123 \
-  --radius-user dlpuser \
-  --radius-pass dlppass \
-  --mgcp-endpoint gw1 \
-  --rss-path ./data/client/rss.xml \
   --open-sites
 ```
 
 Открыть конкретные сайты:
 
 ```bash
-python3 traffic_generator.py <server_ip> --sites "kremlin.ru,web.whatsapp.com,web.telegram.org,instagram.com"
+python3 traffic_generator.py <server_ip> --sites "http://example.com,https://google.com"
 ```
 
-Порты и TLS/SSL (пример):
+Пример с портами и TLS/SSL:
 
 ```bash
 python3 traffic_generator.py <server_ip> \
@@ -84,7 +87,7 @@ python3 traffic_generator.py <server_ip> \
 Скрипт автоматически читает `.env` из текущей папки. Если файл лежит в другом месте, укажите путь:
 
 ```bash
-python3 traffic_generator.py --env-file C:\\path\\to\\.env <server_ip>
+python3 traffic_generator.py --env-file C:\\path\\to\\.env
 ```
 
 Эквивалентные переменные окружения:
@@ -108,6 +111,5 @@ python3 traffic_generator.py --env-file C:\\path\\to\\.env <server_ip>
 
 - Для отправки сырого трафика scapy может потребоваться запуск с повышенными правами.
 - H.323 использует внешнюю утилиту `yate-console` или `simph323`; если не найдена — будет предупреждение.
-- RSS сохраняется в `./data/client/rss.xml` (папка создается автоматически).
 - Цветной вывод можно отключить через `NO_COLOR=1`.
 - Значения по умолчанию совпадают с конфигами проекта `sorm-test-server`.

@@ -1,0 +1,26 @@
+# Handle line endings automatically for files detected as text
+# and leave binary files untouched.
+* text=auto
+
+# Explicitly declare text files you want to always be normalized and converted
+# to native line endings on checkout.
+*.py text
+*.md text
+*.txt text
+*.conf text
+*.lua text
+*.html text
+*.xml text
+*.yml text
+*.json text
+
+# Declare files that will always have LF line endings.
+*.sh eol=lf
+
+# Denote all files that are truly binary and should not be modified.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.wav binary
